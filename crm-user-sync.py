@@ -2,81 +2,96 @@
 crm_user_sync.py
 ────────────────────────────────────────────
 Webhook automation example:
-Receives CRM purchase data and syncs user info
-to a (mock) user platform — using JSONPlaceholder
-as the backend for demonstration.
-
-✅ 100% safe for GitHub and portfolio use.
+- Receives CRM purchase events
+- Creates/updates users on mock platform
+- Appends each purchase to sales.csv for revenue tracking
 """
 
 import os
 import uuid
-import time
 import json
-import requests
+import csv
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import requests
 
-# ─── Configuration ─────────────────────────────────────────────────────────────
+# Configuration
 MYPLATFORM_BASE_URL = os.getenv("MYPLATFORM_BASE_URL", "https://jsonplaceholder.typicode.com")
 DEFAULT_PLAN = os.getenv("MYPLATFORM_DEFAULT_PLAN", "free")
+SALES_FILE = os.getenv("SALES_FILE", "sales.csv")
 
-# ─── HTTP-CLASS ENTRYPOINT ─────────────────────────────────────────────────────
+# ─── HTTP Handler ─────────────────────────────────────────────
 class handler(BaseHTTPRequestHandler):
-    """Handles incoming CRM webhooks (POST requests)."""
-
     def do_POST(self):
         try:
             length = int(self.headers.get("Content-Length", 0))
-            raw_body = self.rfile.read(length)
-            event = json.loads(raw_body)
+            payload = json.loads(self.rfile.read(length))
         except Exception as e:
-            return self.send_error(400, f"Invalid JSON: {e}")
+            self._send_error(400, f"Invalid JSON: {e}")
+            return
 
-        # Simulated CRM payload
-        purchase = event.get("purchase", {})
+        txn = payload.get("purchase", {})
+        email = txn.get("email")
+        product = txn.get("product_name", "Unknown Product")
+        amount = txn.get("amount") or "0"
+        date = txn.get("date") or datetime.utcnow().isoformat()
+
         contact = {
-            "FirstName": purchase.get("first_name", ""),
-            "LastName":  purchase.get("last_name", ""),
-            "Email":     purchase.get("email", ""),
-            "Product":   purchase.get("product_name", "Unknown Product"),
-            "Plan":      purchase.get("plan", DEFAULT_PLAN),
+            "FirstName": txn.get("first_name", "First"),
+            "LastName":  txn.get("last_name", "Last"),
+            "Email":     email,
+            "Product":   product,
+            "Plan":      txn.get("plan", DEFAULT_PLAN),
         }
 
         try:
-            result = process_purchase(contact)
-            status, body = 200, {"status": "ok", "detail": result}
+            # User creation/updating
+            user_result = process_purchase(contact)
+
+            # Append to sales.csv for revenue tracking
+            append_to_sales_csv(date, email, product, amount, contact["Plan"])
+
+            self._send_response({
+                "status": "success",
+                "user_action": user_result["action"],
+                "rows_written": get_sales_row_count()
+            })
         except Exception as e:
-            status, body = 500, {"error": str(e)}
+            self._send_error(500, str(e))
 
-        response = json.dumps(body).encode()
-        self.send_response(status)
+    # ─── Helpers ─────────────────────────────
+    def _send_response(self, data):
+        resp = json.dumps(data).encode()
+        self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(response)))
+        self.send_header("Content-Length", str(len(resp)))
         self.end_headers()
-        self.wfile.write(response)
+        self.wfile.write(resp)
 
-# ─── HTTP Utility with Retry ──────────────────────────────────────────────────
+    def _send_error(self, code, message):
+        resp = json.dumps({"error": message}).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(resp)))
+        self.end_headers()
+        self.wfile.write(resp)
+
+# ─── USER PLATFORM FUNCTIONS ──────────────────────────────────────────────
 def request_with_retry(url, method="GET", **kwargs):
-    """Basic retry logic for API requests."""
     for attempt in range(3):
         try:
             resp = requests.request(method, url, timeout=10, **kwargs)
             resp.raise_for_status()
             return resp
-        except Exception as e:
+        except Exception:
             if attempt == 2:
                 raise
-            time.sleep(0.5 * (attempt + 1))
+            import time; time.sleep(0.5*(attempt+1))
 
-# ─── Mock "Platform" Functions ────────────────────────────────────────────────
 def get_user_by_email(email):
-    """Check if a user exists by email (mocked)."""
-    # JSONPlaceholder doesn’t really support search, so always return None
-    return None
+    return None  # Always create new for demo
 
 def create_user(contact):
-    """Simulate creating a user record."""
     payload = {
         "id": str(uuid.uuid4()),
         "first_name": contact["FirstName"],
@@ -86,47 +101,32 @@ def create_user(contact):
         "product": contact["Product"],
         "joined": datetime.utcnow().isoformat(),
     }
-    resp = request_with_retry(
-        f"{MYPLATFORM_BASE_URL}/users",
-        method="POST",
-        json=payload
-    )
+    resp = request_with_retry(f"{MYPLATFORM_BASE_URL}/users", method="POST", json=payload)
     return resp.json()
 
 def update_user(user_id, contact):
-    """Simulate updating an existing user record."""
     payload = {
         "plan": contact["Plan"],
         "last_updated": datetime.utcnow().isoformat()
     }
-    resp = request_with_retry(
-        f"{MYPLATFORM_BASE_URL}/users/{user_id}",
-        method="PUT",
-        json=payload
-    )
+    resp = request_with_retry(f"{MYPLATFORM_BASE_URL}/users/{user_id}", method="PUT", json=payload)
     return resp.json()
 
 def send_welcome_email(contact, existing=False):
-    """Print simulated welcome email to console."""
     subject = "Welcome Back!" if existing else "🎉 Welcome to MyPlatform!"
     message = (
         f"Hi {contact['FirstName']},\n\n"
         f"Thanks for your {contact['Product']} purchase! "
-        f"Your account has been {'updated' if existing else 'created'} "
-        f"successfully.\n\n"
-        "→ Log in anytime at https://myplatform.example.com/login\n\n"
+        f"Your account has been {'updated' if existing else 'created'}.\n\n"
+        "→ Log in at https://myplatform.example.com/login\n\n"
         "- The MyPlatform Team"
     )
-    print("=" * 60)
-    print(f"📧 Sending simulated email to {contact['Email']}")
-    print(f"Subject: {subject}\n\n{message}")
-    print("=" * 60)
+    print("="*50)
+    print(f"📧 Simulated email to {contact['Email']}\nSubject: {subject}\n{message}")
+    print("="*50)
 
-# ─── Core Logic ───────────────────────────────────────────────────────────────
 def process_purchase(contact):
-    """Create or update user based on CRM purchase event."""
     user = get_user_by_email(contact["Email"])
-
     if user:
         updated = update_user(user["id"], contact)
         send_welcome_email(contact, existing=True)
@@ -136,16 +136,29 @@ def process_purchase(contact):
         send_welcome_email(contact, existing=False)
         return {"action": "created", "result": new_user}
 
-# ─── Local Dev Entrypoint ─────────────────────────────────────────────────────
+# ─── SALES CSV FUNCTIONS ──────────────────────────────────────────────
+def append_to_sales_csv(date, email, product, amount, plan):
+    header = ["date", "email", "product", "amount", "plan"]
+    rows = []
+    if os.path.exists(SALES_FILE):
+        with open(SALES_FILE, "r", newline="") as f:
+            reader = csv.reader(f)
+            rows = [r for r in reader if len(r)==5 and r[0] != "date"]
+    rows.append([date, email, product, amount, plan])
+    with open(SALES_FILE, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+def get_sales_row_count():
+    if not os.path.exists(SALES_FILE):
+        return 0
+    with open(SALES_FILE, "r") as f:
+        return sum(1 for _ in f) - 1  # exclude header
+
+# ─── ENTRYPOINT ─────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
     server = HTTPServer(("0.0.0.0", port), handler)
-    print(f"🚀 Listening for CRM webhooks on port {port}...\n")
-    print("Try posting sample data with:\n")
-    print(
-        "curl -X POST http://localhost:8080 "
-        "-H 'Content-Type: application/json' "
-        "-d '{\"purchase\": {\"first_name\":\"Jane\",\"last_name\":\"Doe\",\"email\":\"jane@example.com\",\"product_name\":\"CRM Pro\",\"plan\":\"gold\"}}'"
-    )
-    print()
+    print(f"🚀 Listening for CRM webhook events on port {port}...")
     server.serve_forever()
