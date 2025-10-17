@@ -1,20 +1,9 @@
-"""
-crm_revenue_tracking.py
-────────────────────────────────────────────
-Simple revenue tracking for CRM purchases.
-- Reads sales.csv produced by crm_user_sync.py
-- Aggregates total sales, revenue per product, and other stats
-- Fully local; no Azure storage required
-"""
-
 import os
 import csv
 from collections import defaultdict
 
-# ─── Configuration ─────────────────────────────────────────────
 SALES_FILE = os.getenv("SALES_FILE", "sales.csv")
 
-# ─── UTILITY FUNCTIONS ─────────────────────────────────────────
 def read_sales_csv():
     if not os.path.exists(SALES_FILE):
         print(f"No sales data found at {SALES_FILE}")
@@ -47,7 +36,7 @@ def summarize_sales(rows):
 
 def print_summary(summary):
     print("\n📊 CRM Revenue Summary")
-    print("="*40)
+    print("=" * 40)
     print(f"Total sales: {summary['total_sales']}")
     print(f"Total revenue: ${summary['total_revenue']:.2f}")
     print("\nSales per product:")
@@ -57,9 +46,8 @@ def print_summary(summary):
     print("\nRevenue per product:")
     for product, revenue in summary["revenue_per_product"].items():
         print(f"  {product}: ${revenue:.2f}")
-    print("="*40)
+    print("=" * 40)
 
-# ─── ENTRYPOINT ─────────────────────────────────────────────
 if __name__ == "__main__":
     sales_rows = read_sales_csv()
     if not sales_rows:
